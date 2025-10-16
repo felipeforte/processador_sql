@@ -18,9 +18,11 @@ class ParserSQL:
             # Cabeçalho: SELECT ... FROM ...
             head_pat = r"""
                 ^\s*SELECT\s+(?P<select>.+?)\s+
-                FROM\s+(?P<from>\w+(?:\s+\w+)?)\s*
-                (?P<rest>.*)$
-            """
+                FROM\s+(?P<from>\w+(?:\s+(?:AS\s+)?\w+)?)
+                (?=\s+(?:INNER\s+JOIN|WHERE|$))
+                \s*(?P<rest>.*)$
+                """
+
             m = re.search(head_pat, self.sql_query, re.IGNORECASE | re.VERBOSE | re.DOTALL)
             if not m:
                 self.valid = False

@@ -19,6 +19,11 @@ queries = [
     "DELETE FROM tabela",  # Comando não permitido
 ]
 
+queries = [
+    "select produto.nome from produto inner join pedido_has_produto ON produto.idproduto = pedido_has_produto.produto_idproduto inner join pedido on pedido.id_pedido = pedido_has_produto.pedido_idpedido where produto.nome = 'arroz' and produto.nome = 'arroz2'"
+]
+
+
 for i, query in enumerate(queries):
     print(f"\n--- Consulta {i+1} ---")
     print(f"SQL: {query}")
