@@ -1,4 +1,5 @@
 from classes import ParserSQL
+from classes.grafos import gerar_grafo
 
 queries = [
     # Consultas válidas
@@ -29,3 +30,8 @@ for i, query in enumerate(queries):
     print(f"SQL: {query}")
     parser = ParserSQL(query)
     parser.print_components()
+
+
+if __name__ == "__main__":
+    for i, query in enumerate(queries, 1):
+        gerar_grafo(query, f"query_{i}.png")
