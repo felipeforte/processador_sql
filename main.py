@@ -1,5 +1,5 @@
 from classes import ParserSQL
-from classes.grafos import gerar_grafo
+from classes.grafos import gerar_grafos_otimizados
 
 queries = [
     # Consultas válidas
@@ -20,10 +20,6 @@ queries = [
     "DELETE FROM tabela",  # Comando não permitido
 ]
 
-queries = [
-    "select produto.nome from produto inner join pedido_has_produto ON produto.idproduto = pedido_has_produto.produto_idproduto inner join pedido on pedido.id_pedido = pedido_has_produto.pedido_idpedido where produto.nome = 'arroz' and produto.nome = 'arroz2'"
-]
-
 
 for i, query in enumerate(queries):
     print(f"\n--- Consulta {i+1} ---")
@@ -34,4 +30,7 @@ for i, query in enumerate(queries):
 
 if __name__ == "__main__":
     for i, query in enumerate(queries, 1):
-        gerar_grafo(query, f"query_{i}.png")
+        print(f"\n{'='*50}")
+        print(f"Gerando grafos para Consulta {i}")
+        print(f"SQL: {query}")
+        gerar_grafos_otimizados(query, f"query_{i}")

@@ -82,23 +82,21 @@ class ParserSQL:
     # Validações auxiliares
 
     def _validar_condicao(self, cond):
-        """
-        Aceita:
-          - identificadores simples ou qualificados (a.id, pedidos.cliente_id)
-          - strings entre aspas simples
-          - números
-          - comparadores permitidos (=, >, <, <=, >=, <>)
-          - parênteses
-          - operador lógico AND (somente)
-        """
+        # Rejeita operadores não permitidos explicitamente
+        proibidos = [r'\bOR\b', r'\bNOT\b', r'~~', r'~', r'\bLIKE\b', r'\bIS\b', r'\bNULL\b']
+        for padrao in proibidos:
+            if re.search(padrao, cond, re.IGNORECASE):
+                return False
+
+        # Depois, aplicar a validação estrutural
         valid_pattern = r"""
             ^(?:\s*
-                (?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?   # id ou id.id
-                  |'[^']*'                            # strings '...'
-                  |\d+(?:\.\d+)?                      # números
-                  |<=|>=|<>|=|<|>                     # comparadores
-                  |\(|\)                              # parênteses
-                  |AND                                # apenas AND
+                (?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?   # coluna ou tabela.coluna
+                |'[^']*'                            # string
+                |\d+(?:\.\d+)?                      # número
+                |<=|>=|<>|=|<|>                     # operadores
+                |\(|\)                              # parênteses
+                |AND                                # AND permitido
                 )
             \s*)+$"""
         if not re.match(valid_pattern, cond, re.IGNORECASE | re.VERBOSE):
@@ -172,6 +170,188 @@ class ParserSQL:
             expr = f"π_{{{attrs}}}({expr})"
 
         return expr
+    
+    def otimizar_algebra_relacional(self):
+        """
+        Otimiza a álgebra relacional com heurísticas:
+          - Push-down de seleções (σ)
+          - Projeção precoce (π) com atributos necessários
+          - Evita produtos cartesianos
+        """
+        if not self.parsed:
+            self.parse()
+        if not self.valid:
+            return None
+
+        # === ETAPA 1: Coletar todas as tabelas e aliases ===
+        tabelas = []
+        from_part = self.components['from']
+        if ' ' in from_part:
+            tabela_base, alias_base = from_part.split(' ', 1)
+            tabelas.append((tabela_base, alias_base.strip()))
+        else:
+            tabelas.append((from_part, from_part))
+
+        for join in self.components['joins']:
+            jpart = join['table']
+            if ' ' in jpart:
+                t, a = jpart.split(' ', 1)
+                tabelas.append((t, a.strip()))
+            else:
+                tabelas.append((jpart, jpart))
+
+        alias_para_tabela = {alias: nome for nome, alias in tabelas}
+        tabela_para_alias = {nome: alias for nome, alias in tabelas}
+
+        # === ETAPA 2: Coletar todos os atributos usados ===
+        atributos_usados = set()
+
+        # Atributos no SELECT
+        select = self.components['select'].strip()
+        if select != '*':
+            for attr in select.split(','):
+                attr = attr.strip()
+                atributos_usados.add(attr)
+
+        # Atributos nas condições: WHERE e ON
+        todas_condicoes = []
+        if self.components['where']:
+            todas_condicoes.extend(self._quebrar_and(self.components['where']))
+        for join in self.components['joins']:
+            todas_condicoes.append(join['on'])
+
+        for cond in todas_condicoes:
+            # Extrair todos os identificadores do tipo [tabela.]coluna
+            ids = re.findall(r'\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\b', cond)
+            for id_ in ids:
+                if '.' in id_:
+                    atributos_usados.add(id_)  # ex: a.nome
+                else:
+                    # Coluna sem qualificação – ambígua; mantemos como está (não otimizamos)
+                    # Em um sistema real, exigiria qualificação ou análise de esquema
+                    pass
+
+        # === ETAPA 3: Mapear atributos por tabela/alias ===
+        atributos_por_alias = {alias: set() for _, alias in tabelas}
+
+        for attr in atributos_usados:
+            if '.' in attr:
+                prefixo, coluna = attr.split('.', 1)
+                if prefixo in atributos_por_alias:
+                    atributos_por_alias[prefixo].add(coluna)
+                else:
+                    # Pode ser nome real da tabela; tentar mapear
+                    for alias, nome_real in alias_para_tabela.items():
+                        if nome_real == prefixo:
+                            atributos_por_alias[alias].add(coluna)
+                            break
+            else:
+                # Atributo não qualificado – não sabemos de qual tabela é.
+                # Para segurança, **não aplicamos projeção** nesse caso.
+                # Mas como nosso parser exige qualificação em joins, isso é raro.
+                pass
+
+        # === ETAPA 4: Analisar WHERE para seleções por tabela ===
+        selecoes_por_tabela = {alias: [] for _, alias in tabelas}
+        condicoes_multiplas = []
+
+        where = self.components['where']
+        if where:
+            condicoes = self._quebrar_and(where)
+            for cond in condicoes:
+                tabelas_na_cond = self._extrair_tabelas_da_condicao(cond, alias_para_tabela)
+                if len(tabelas_na_cond) == 1:
+                    tabela_unica = list(tabelas_na_cond)[0]
+                    selecoes_por_tabela[tabela_unica].append(cond)
+                else:
+                    condicoes_multiplas.append(cond)
+
+        # === ETAPA 5: Construir expressões com σ e π precoces ===
+        expressoes_tabela = {}
+
+        for nome_real, alias in tabelas:
+            expr = nome_real
+
+            # Renomeação se necessário
+            if alias != nome_real:
+                expr = f"ρ_{{{alias}←{nome_real}}}({nome_real})"
+
+            # Seleção (σ) se houver
+            if selecoes_por_tabela[alias]:
+                cond_join = " ∧ ".join(selecoes_por_tabela[alias])
+                expr = f"σ_{{{cond_join}}}({expr})"
+
+            # Projeção (π) com atributos necessários
+            attrs_necessarios = atributos_por_alias[alias]
+            if attrs_necessarios:
+                # Incluir também atributos usados nas condições de junção (ON)
+                # Já estão em `atributos_usados`, então ok.
+                attrs_list = ', '.join(sorted(attrs_necessarios))
+                expr = f"π_{{{attrs_list}}}({expr})"
+            # Se não soubermos os atributos (ex: SELECT *), não aplicamos π
+
+            expressoes_tabela[alias] = expr
+
+        # === ETAPA 6: Montar junções na ordem original ===
+        aliases_ordem = [alias for _, alias in tabelas]
+        expr_atual = expressoes_tabela[aliases_ordem[0]]
+
+        for i in range(1, len(aliases_ordem)):
+            alias_atual = aliases_ordem[i]
+            join_info = self.components['joins'][i - 1]
+            cond_join = join_info['on']
+            relacao_atual = expressoes_tabela[alias_atual]
+            expr_atual = f"({expr_atual} ⨝_{{{cond_join}}} {relacao_atual})"
+
+        # === ETAPA 7: Condições multi-tabela (WHERE) ===
+        if condicoes_multiplas:
+            cond_final = " ∧ ".join(condicoes_multiplas)
+            expr_atual = f"σ_{{{cond_final}}}({expr_atual})"
+
+        # === ETAPA 8: Projeção final (se SELECT não for *) ===
+        if select != '*':
+            attrs_finais = ', '.join([s.strip() for s in select.split(',')])
+            expr_atual = f"π_{{{attrs_finais}}}({expr_atual})"
+
+        return expr_atual
+
+    def _quebrar_and(self, condicao: str) -> list:
+        """Quebra uma condição com AND em partes, respeitando parênteses."""
+        partes = []
+        nivel = 0
+        inicio = 0
+        for i, ch in enumerate(condicao):
+            if ch == '(':
+                nivel += 1
+            elif ch == ')':
+                nivel -= 1
+            elif nivel == 0 and condicao[i:i+3].upper() == 'AND':
+                partes.append(condicao[inicio:i].strip())
+                inicio = i + 3
+        partes.append(condicao[inicio:].strip())
+        return partes
+
+    def _extrair_tabelas_da_condicao(self, condicao: str, alias_para_tabela: dict) -> set:
+        """Extrai os aliases (ou nomes de tabelas) usados em uma condição."""
+        # Padrão para identificadores: [tabela.]coluna
+        ids = re.findall(r'\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\b', condicao)
+        tabelas_usadas = set()
+        for id_ in ids:
+            if '.' in id_:
+                prefixo = id_.split('.')[0]
+                if prefixo in alias_para_tabela:
+                    tabelas_usadas.add(prefixo)
+                elif prefixo in alias_para_tabela.values():
+                    # Caso o nome real seja usado diretamente
+                    for alias, nome in alias_para_tabela.items():
+                        if nome == prefixo:
+                            tabelas_usadas.add(alias)
+                            break
+            else:
+                # Coluna sem qualificação – ambígua, consideramos todas? 
+                # Para simplicidade, ignoramos (ou assumimos que não ocorre em queries válidas)
+                pass
+        return tabelas_usadas
 
     def print_components(self):
         if not self.parsed:
@@ -190,7 +370,13 @@ class ParserSQL:
                 print(f"  JOIN {i}: {j['table']} ON {j['on']}")
         if self.components['where']:
             print(f"  WHERE:  {self.components['where']}")
-        ra = self.to_rel_algebra()
-        if ra:
-            print("Álgebra Relacional:")
-            print(f"  {ra}")
+
+        ra_original = self.to_rel_algebra()
+        ra_otimizada = self.otimizar_algebra_relacional()
+
+        if ra_original:
+            print("\nÁlgebra Relacional (Original):")
+            print(f"  {ra_original}")
+        if ra_otimizada:
+            print("\nÁlgebra Relacional (Otimizada):")
+            print(f"  {ra_otimizada}")
