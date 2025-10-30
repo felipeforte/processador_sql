@@ -37,6 +37,7 @@ st.markdown("""
         font-family: 'Courier New', monospace;
         font-size: 14px;
         margin: 10px 0;
+        color: #000000;
     }
     .component-box {
         background-color: #e3f2fd;
